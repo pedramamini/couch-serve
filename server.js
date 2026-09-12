@@ -8,14 +8,121 @@ import { tmpdir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const MEDIA_DIR = process.argv[2] || join(__dirname, "media");
-const PORT = parseInt(process.env.PORT || "8080", 10);
+const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`couch-serve - Stream videos from your Mac to any device
+
+Usage: node server.js [media-dir] [options]
+
+Options:
+  --port <n>   Port to listen on (default: 8080, or PORT env)
+  --demo       Launch with fake data for screenshots
+  --help, -h   Show this help
+
+Examples:
+  node server.js ~/Movies
+  node server.js ~/Movies --port 3000
+  node server.js --demo`);
+  process.exit(0);
+}
+
+const DEMO_MODE = args.includes("--demo");
+const portIdx = args.indexOf("--port");
+const portVal = portIdx !== -1 ? args[portIdx + 1] : null;
+const PORT = portVal ? parseInt(portVal, 10) : parseInt(process.env.PORT || "8080", 10);
+const skipArgs = new Set(["--demo", "--port", portVal].filter(Boolean));
+const MEDIA_DIR = DEMO_MODE ? "/demo" : (args.find(a => !skipArgs.has(a) && !a.startsWith("--")) || join(__dirname, "media"));
 const NATIVE_EXTENSIONS = new Set([".mp4", ".m4v", ".mov"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".ogv", ".3gp"]);
 
 const hlsSessions = new Map();
 
 const app = express();
+
+// Demo mode: serve fake data for screenshots
+if (DEMO_MODE) {
+  const DEMO_VOLUMES = ["Macintosh HD", "Media Drive", "Backup Plus"];
+  const DEMO_FOLDERS = {
+    "": [
+      { name: "Action", path: "Action", mtime: 1726000000000 },
+      { name: "Comedy", path: "Comedy", mtime: 1725000000000 },
+      { name: "Documentary", path: "Documentary", mtime: 1724000000000 },
+      { name: "Family", path: "Family", mtime: 1723000000000 },
+    ],
+    "Action": [
+      { name: "John Wick Collection", path: "Action/John Wick Collection", mtime: 1726000000000 },
+      { name: "Mission Impossible", path: "Action/Mission Impossible", mtime: 1725500000000 },
+    ],
+    "Comedy": [],
+    "Documentary": [],
+    "Family": [],
+    "Action/John Wick Collection": [],
+    "Action/Mission Impossible": [],
+  };
+  const DEMO_VIDEOS = {
+    "": [
+      { name: "Inception (2010).mp4", path: "Inception (2010).mp4", size: 2147483648, mtime: 1726100000000, transcode: false },
+      { name: "The Matrix (1999).mkv", path: "The Matrix (1999).mkv", size: 4294967296, mtime: 1720000000000, transcode: true },
+    ],
+    "Action": [
+      { name: "Mad Max Fury Road (2015).mp4", path: "Action/Mad Max Fury Road (2015).mp4", size: 3221225472, mtime: 1726000000000, transcode: false },
+      { name: "Top Gun Maverick (2022).mp4", path: "Action/Top Gun Maverick (2022).mp4", size: 2684354560, mtime: 1725000000000, transcode: false },
+      { name: "Die Hard (1988).avi", path: "Action/Die Hard (1988).avi", size: 1503238553, mtime: 1710000000000, transcode: true },
+    ],
+    "Action/John Wick Collection": [
+      { name: "John Wick (2014).mp4", path: "Action/John Wick Collection/John Wick (2014).mp4", size: 2147483648, mtime: 1726000000000, transcode: false },
+      { name: "John Wick 2 (2017).mp4", path: "Action/John Wick Collection/John Wick 2 (2017).mp4", size: 2415919104, mtime: 1725000000000, transcode: false },
+      { name: "John Wick 3 (2019).mkv", path: "Action/John Wick Collection/John Wick 3 (2019).mkv", size: 3758096384, mtime: 1724000000000, transcode: true },
+      { name: "John Wick 4 (2023).mp4", path: "Action/John Wick Collection/John Wick 4 (2023).mp4", size: 3489660928, mtime: 1723000000000, transcode: false },
+    ],
+    "Action/Mission Impossible": [
+      { name: "Mission Impossible (1996).mp4", path: "Action/Mission Impossible/Mission Impossible (1996).mp4", size: 1610612736, mtime: 1720000000000, transcode: false },
+      { name: "MI Fallout (2018).mp4", path: "Action/Mission Impossible/MI Fallout (2018).mp4", size: 3221225472, mtime: 1722000000000, transcode: false },
+      { name: "MI Dead Reckoning (2023).mp4", path: "Action/Mission Impossible/MI Dead Reckoning (2023).mp4", size: 3758096384, mtime: 1726000000000, transcode: false },
+    ],
+    "Comedy": [
+      { name: "The Grand Budapest Hotel (2014).mp4", path: "Comedy/The Grand Budapest Hotel (2014).mp4", size: 1932735283, mtime: 1725000000000, transcode: false },
+      { name: "Superbad (2007).avi", path: "Comedy/Superbad (2007).avi", size: 1503238553, mtime: 1715000000000, transcode: true },
+      { name: "The Big Lebowski (1998).mp4", path: "Comedy/The Big Lebowski (1998).mp4", size: 2147483648, mtime: 1710000000000, transcode: false },
+    ],
+    "Documentary": [
+      { name: "Planet Earth S01E01.mp4", path: "Documentary/Planet Earth S01E01.mp4", size: 1073741824, mtime: 1726000000000, transcode: false },
+      { name: "Planet Earth S01E02.mp4", path: "Documentary/Planet Earth S01E02.mp4", size: 1073741824, mtime: 1726000000000, transcode: false },
+      { name: "Free Solo (2018).mkv", path: "Documentary/Free Solo (2018).mkv", size: 2684354560, mtime: 1720000000000, transcode: true },
+    ],
+    "Family": [
+      { name: "Spirited Away (2001).mp4", path: "Family/Spirited Away (2001).mp4", size: 2147483648, mtime: 1725000000000, transcode: false },
+      { name: "The Incredibles (2004).mp4", path: "Family/The Incredibles (2004).mp4", size: 1932735283, mtime: 1720000000000, transcode: false },
+      { name: "Coco (2017).mp4", path: "Family/Coco (2017).mp4", size: 2415919104, mtime: 1722000000000, transcode: false },
+    ],
+  };
+
+  app.get("/api/config", (_req, res) => res.json({ mediaDir: "/demo" }));
+  app.get("/api/volumes", (_req, res) => res.json(DEMO_VOLUMES));
+  app.get("/api/browse", (req, res) => {
+    const dir = (req.query.dir || "").replace(/\.\./g, "");
+    res.json({
+      dir: dir || null,
+      folders: DEMO_FOLDERS[dir] || [],
+      videos: DEMO_VIDEOS[dir] || [],
+    });
+  });
+  app.get("/api/search", (req, res) => {
+    const q = (req.query.q || "").toLowerCase();
+    if (!q) return res.json({ folders: [], videos: [] });
+    const folders = [], videos = [];
+    for (const items of Object.values(DEMO_FOLDERS)) {
+      for (const f of items) { if (f.name.toLowerCase().includes(q)) folders.push(f); }
+    }
+    for (const items of Object.values(DEMO_VIDEOS)) {
+      for (const v of items) { if (v.name.toLowerCase().includes(q)) videos.push(v); }
+    }
+    res.json({ folders: folders.slice(0, 20), videos: videos.slice(0, 20) });
+  });
+  app.get("/api/stream/*", (_req, res) => res.status(404).json({ error: "Demo mode" }));
+  app.post("/api/hls/start", (_req, res) => res.status(404).json({ error: "Demo mode" }));
+}
 
 function resolveBase(req) {
   const vol = req.query.vol;

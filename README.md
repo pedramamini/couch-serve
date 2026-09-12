@@ -2,6 +2,8 @@
 
 Stream videos from your Mac to your iPad over the local network. No accounts, no library scan, no setup ceremony. Point it at a folder and open the browser.
 
+![couch-serve on iPad](screenshot.png)
+
 ## Quick start
 
 ```bash
@@ -32,11 +34,20 @@ Open `http://<your-mac-ip>:8080` on your iPad (or any browser).
 
 ## Usage
 
+```
+node server.js [media-dir] [options]
+
+Options:
+  --port <n>   Port to listen on (default: 8080, or PORT env)
+  --demo       Launch with fake data for screenshots
+  --help, -h   Show this help
+```
+
 ```bash
-node server.js                     # serves ./media/
-node server.js ~/Movies            # serves ~/Movies
-node server.js /Volumes/External   # serves an external drive
-PORT=9000 node server.js ~/Videos  # custom port
+node server.js ~/Movies
+node server.js ~/Movies --port 3000
+node server.js /Volumes/External
+node server.js --demo
 ```
 
 The server is a single file (`server.js`). No build step, no config file, no database. HLS temp files are cleaned up automatically on stop, shutdown, or after 5 minutes of inactivity.
