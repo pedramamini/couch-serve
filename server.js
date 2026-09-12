@@ -17,9 +17,34 @@ const hlsSessions = new Map();
 
 const app = express();
 
+function resolveBase(req) {
+  const vol = req.query.vol;
+  if (vol && !vol.includes("..")) {
+    const volPath = join("/Volumes", vol);
+    try { if (statSync(volPath).isDirectory()) return volPath; } catch {}
+  }
+  return MEDIA_DIR;
+}
+
+app.get("/api/volumes", (_req, res) => {
+  try {
+    const entries = readdirSync("/Volumes", { withFileTypes: true });
+    const volumes = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const full = join("/Volumes", entry.name);
+      try { if (statSync(full).isDirectory()) volumes.push(entry.name); } catch {}
+    }
+    res.json(volumes);
+  } catch {
+    res.json([]);
+  }
+});
+
 app.get("/api/browse", (req, res) => {
+  const base = resolveBase(req);
   const relDir = (req.query.dir || "").replace(/\.\./g, "");
-  const absDir = join(MEDIA_DIR, relDir);
+  const absDir = join(base, relDir);
 
   let entries;
   try {
@@ -51,11 +76,12 @@ app.get("/api/browse", (req, res) => {
 });
 
 app.get("/api/search", (req, res) => {
+  const base = resolveBase(req);
   const q = (req.query.q || "").toLowerCase();
   const relDir = (req.query.dir || "").replace(/\.\./g, "");
   if (!q) return res.json({ folders: [], videos: [] });
 
-  const absDir = join(MEDIA_DIR, relDir);
+  const absDir = join(base, relDir);
   const folders = [];
   const videos = [];
 
@@ -70,7 +96,7 @@ app.get("/api/search", (req, res) => {
       try { stat = statSync(full); } catch { continue; }
       const rel = relDir
         ? relDir + "/" + full.slice(absDir.length + 1)
-        : full.slice(MEDIA_DIR.length + 1);
+        : full.slice(base.length + 1);
       if (stat.isDirectory()) {
         if (entry.name.toLowerCase().includes(q)) folders.push({ name: entry.name, path: rel });
         scan(full, depth + 1);
@@ -87,10 +113,11 @@ app.get("/api/search", (req, res) => {
 });
 
 app.get("/api/stream/*", (req, res) => {
+  const base = resolveBase(req);
   const relPath = req.params[0];
   if (relPath.includes("..")) return res.status(400).end();
 
-  const filePath = join(MEDIA_DIR, relPath);
+  const filePath = join(base, relPath);
   let stat;
   try {
     stat = statSync(filePath);
@@ -126,8 +153,8 @@ app.get("/api/stream/*", (req, res) => {
 });
 
 // HLS transcoding
-function createHlsSession(relPath) {
-  const filePath = join(MEDIA_DIR, relPath);
+function createHlsSession(relPath, base) {
+  const filePath = join(base, relPath);
   if (!existsSync(filePath)) return null;
 
   const sessionId = Math.random().toString(36).slice(2, 10);
@@ -166,10 +193,11 @@ function destroyHlsSession(sessionId) {
 }
 
 app.post("/api/hls/start", (req, res) => {
+  const base = resolveBase(req);
   const relPath = req.query.path;
   if (!relPath || relPath.includes("..")) return res.status(400).json({ error: "Invalid path" });
 
-  const session = createHlsSession(relPath);
+  const session = createHlsSession(relPath, base);
   if (!session) return res.status(404).json({ error: "File not found" });
 
   res.json({ sessionId: session.id, playlistUrl: "/api/hls/" + session.id + "/playlist.m3u8" });
@@ -272,7 +300,6 @@ const PAGE_HTML = `<!DOCTYPE html>
   .sr-section { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 14px 4px; }
   .sr-item { display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer; font-size: 0.85rem; color: var(--text); }
   .sr-item:active { background: var(--border); }
-  .sr-icon { flex-shrink: 0; font-size: 0.75rem; }
   .sr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sr-path { font-size: 0.7rem; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sr-info { min-width: 0; flex: 1; }
@@ -290,7 +317,9 @@ const PAGE_HTML = `<!DOCTYPE html>
   .icon svg { width: 14px; height: 14px; fill: #fff; }
   .icon-play { background: var(--accent); }
   .icon-play svg { margin-left: 2px; }
+  .icon-transcode { background: #e05555; }
   .icon-folder { background: #e8a838; }
+  .icon-volume { background: #8b5cf6; }
 
   .item-info { flex: 1; min-width: 0; }
   .item-name { font-size: 0.95rem; word-break: break-word; }
@@ -322,7 +351,10 @@ const PAGE_HTML = `<!DOCTYPE html>
   .popover-item { display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer; font-size: 0.85rem; color: var(--text); }
   .popover-item:active { background: var(--border); }
   .popover-item.current { color: var(--accent); font-weight: 600; }
-  .popover-icon { flex-shrink: 0; font-size: 0.75rem; }
+  .popover-icon { flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; }
+  .popover-icon svg { width: 14px; height: 14px; }
+  .sr-icon { flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; }
+  .sr-icon svg { width: 14px; height: 14px; }
   .popover-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .popover-divider { height: 1px; background: var(--border); margin: 4px 0; }
   .popover-empty { padding: 10px 14px; font-size: 0.8rem; color: var(--text-dim); font-style: italic; }
@@ -340,7 +372,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   <button id="back-btn">&larr; Back</button>
   <span id="nav-title"></span>
   <div id="search-wrap">
-    <button id="search-btn">&#128269;</button>
+    <button id="search-btn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6.5" cy="6.5" r="4.5"/><line x1="10" y1="10" x2="14" y2="14"/></svg></button>
     <input id="search-input" type="text" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
   </div>
   <button id="sort-btn">Sort</button>
@@ -376,6 +408,13 @@ const PAGE_HTML = `<!DOCTYPE html>
 </div>
 
 <script>
+  const ICN = {
+    home: '<svg viewBox="0 0 16 16" fill="white"><path d="M8 1L1 7h2v7h4v-4h2v4h4V7h2L8 1z"/></svg>',
+    folder: '<svg viewBox="0 0 16 16" fill="white"><path d="M1 3h5l2 2h7v9H1V3z"/></svg>',
+    play: '<svg viewBox="0 0 16 16" fill="white"><polygon points="4,2 14,8 4,14"/></svg>',
+    volume: '<svg viewBox="0 0 16 16" fill="none" stroke="white" stroke-width="1.2"><rect x="2" y="3" width="12" height="10" rx="1.5"/><line x1="2" y1="9" x2="14" y2="9"/><circle cx="11.5" cy="11" r="0.9" fill="white" stroke="none"/></svg>',
+  };
+
   const library = document.getElementById('library');
   const overlay = document.getElementById('player-overlay');
   const videoEl = document.getElementById('player');
@@ -397,7 +436,11 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   let currentDir = null;
   let currentData = null;
+  let currentVol = null;
   let sortMode = 'name-asc';
+  let cachedVolumes = [];
+
+  function volParam() { return currentVol ? '&vol=' + encodeURIComponent(currentVol) : ''; }
   let playlist = [];
   let playlistIndex = -1;
   let isPlayerMode = false;
@@ -444,25 +487,50 @@ const PAGE_HTML = `<!DOCTYPE html>
       const parts = currentDir.split('/');
       parts.pop();
       navigate(parts.length ? parts.join('/') : null);
+    } else if (currentVol) {
+      currentVol = null;
+      showVolumes();
     }
   });
 
+  function volumesPeekHtml() {
+    if (cachedVolumes.length === 0) return '';
+    let html = '<div class="popover-divider"></div>';
+    html += '<div class="popover-title">Volumes</div>';
+    for (const vol of cachedVolumes) {
+      const isCurrent = vol === currentVol;
+      html += '<div class="popover-item' + (isCurrent ? ' current' : '') + '" onclick="selectVolume(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + ICN.volume + '</span><span class="popover-name">' + esc(vol) + '</span></div>';
+    }
+    return html;
+  }
+
   addLongPress(backBtn, (el) => {
-    const path = isPlayerMode ? currentDir : currentDir;
-    if (!path) return;
-    const parts = path.split('/');
-    let html = '<div class="popover-item" onclick="popNavFolder(null)"><span class="popover-icon">&#127968;</span><span class="popover-name">Root</span></div>';
-    let acc = '';
-    for (let i = 0; i < parts.length; i++) {
-      acc = acc ? acc + '/' + parts[i] : parts[i];
-      const isCurrent = (acc === path && !isPlayerMode);
-      const p = acc;
-      html += '<div class="popover-item' + (isCurrent ? ' current' : '') + '" onclick="popNavFolder(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">&#128193;</span><span class="popover-name">' + esc(parts[i]) + '</span></div>';
+    let html = '<div class="popover-item" onclick="goHome()"><span class="popover-icon">' + ICN.home + '</span><span class="popover-name">Home</span></div>';
+    const path = currentDir;
+    if (path) {
+      const parts = path.split('/');
+      let acc = '';
+      for (let i = 0; i < parts.length; i++) {
+        acc = acc ? acc + '/' + parts[i] : parts[i];
+        const isCurrent = (acc === path && !isPlayerMode);
+        const p = acc;
+        html += '<div class="popover-item' + (isCurrent ? ' current' : '') + '" onclick="popNavFolder(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + ICN.folder + '</span><span class="popover-name">' + esc(parts[i]) + '</span></div>';
+      }
     }
     if (isPlayerMode && playlistIndex >= 0) {
       html += '<div class="popover-divider"></div>';
-      html += '<div class="popover-item current"><span class="popover-icon">&#9654;</span><span class="popover-name">' + esc(playlist[playlistIndex].name) + '</span></div>';
+      html += '<div class="popover-item current"><span class="popover-icon">' + ICN.play + '</span><span class="popover-name">' + esc(playlist[playlistIndex].name) + '</span></div>';
     }
+    html += volumesPeekHtml();
+    showPeek(el, html);
+  });
+
+  window.goHome = function() { closePeek(); currentVol = null; showVolumes(); };
+
+  addLongPress(navTitle, (el) => {
+    if (cachedVolumes.length === 0) return;
+    let html = '<div class="popover-item" onclick="goHome()"><span class="popover-icon">' + ICN.home + '</span><span class="popover-name">Home</span></div>';
+    html += volumesPeekHtml();
     showPeek(el, html);
   });
 
@@ -600,7 +668,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     if (!q) { searchResults.classList.remove('open'); return; }
     searchDebounce = setTimeout(async () => {
       const dir = currentDir || '';
-      const url = '/api/search?q=' + encodeURIComponent(q) + (dir ? '&dir=' + encodeURIComponent(dir) : '');
+      const url = '/api/search?q=' + encodeURIComponent(q) + (dir ? '&dir=' + encodeURIComponent(dir) : '') + volParam();
       try {
         const res = await fetch(url);
         const data = await res.json();
@@ -621,7 +689,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       html += '<div class="sr-section">Folders</div>';
       for (const f of data.folders) {
         html += '<div class="sr-item" onclick="searchNav(\\'folder\\',\\'' + esc(f.path).replace(/'/g,"\\\\'") + '\\')">'
-          + '<span class="sr-icon">&#128193;</span><div class="sr-info"><div class="sr-name">' + esc(f.name) + '</div>'
+          + '<span class="sr-icon">' + ICN.folder + '</span><div class="sr-info"><div class="sr-name">' + esc(f.name) + '</div>'
           + '<div class="sr-path">' + esc(f.path) + '</div></div></div>';
       }
     }
@@ -629,7 +697,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       html += '<div class="sr-section">Videos</div>';
       for (const v of data.videos) {
         html += '<div class="sr-item" onclick="searchNav(\\'video\\',\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
-          + '<span class="sr-icon">&#9654;</span><div class="sr-info"><div class="sr-name">' + esc(v.name) + '</div>'
+          + '<span class="sr-icon">' + ICN.play + '</span><div class="sr-info"><div class="sr-name">' + esc(v.name) + '</div>'
           + '<div class="sr-path">' + esc(v.path) + '</div></div></div>';
       }
     }
@@ -667,12 +735,16 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   function updateNavTitle() {
+    const prefix = currentVol ? currentVol + '/' : '';
     if (isPlayerMode && playlistIndex >= 0) {
       const v = playlist[playlistIndex];
-      navTitle.textContent = (currentDir ? currentDir + '/' : '') + v.name;
+      navTitle.textContent = prefix + (currentDir ? currentDir + '/' : '') + v.name;
       backBtn.style.display = '';
     } else if (currentDir) {
-      navTitle.textContent = currentDir;
+      navTitle.textContent = prefix + currentDir;
+      backBtn.style.display = '';
+    } else if (currentVol) {
+      navTitle.textContent = currentVol;
       backBtn.style.display = '';
     } else {
       navTitle.textContent = 'Videos';
@@ -702,6 +774,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   function buildHash() {
     const parts = [];
+    if (currentVol) parts.push('vol=' + encodeURIComponent(currentVol));
     if (currentDir) parts.push('dir=' + encodeURIComponent(currentDir));
     if (playlistIndex >= 0 && playlist[playlistIndex]) parts.push('play=' + encodeURIComponent(playlist[playlistIndex].path));
     return parts.length ? '#' + parts.join('&') : '#';
@@ -744,7 +817,7 @@ const PAGE_HTML = `<!DOCTYPE html>
           const idx = playlist.indexOf(v);
           playlistIndex = idx;
           enterPlayerMode();
-          videoEl.src = '/api/stream/' + encodeURIComponent(v.path).replace(/%2F/g, '/');
+          videoEl.src = '/api/stream/' + encodeURIComponent(v.path).replace(/%2F/g, '/') + '?' + volParam().slice(1);
           videoEl.play();
           updatePill();
           updateNavTitle();
@@ -786,13 +859,13 @@ const PAGE_HTML = `<!DOCTYPE html>
 
     const video = playlist[idx];
     if (video && video.transcode) {
-      const startRes = await fetch('/api/hls/start?path=' + encodeURIComponent(path), { method: 'POST' });
+      const startRes = await fetch('/api/hls/start?path=' + encodeURIComponent(path) + volParam(), { method: 'POST' });
       const data = await startRes.json();
       if (data.error) return;
       activeHlsSession = data.sessionId;
       videoEl.src = data.playlistUrl;
     } else {
-      videoEl.src = '/api/stream/' + encodeURIComponent(path).replace(/%2F/g, '/');
+      videoEl.src = '/api/stream/' + encodeURIComponent(path).replace(/%2F/g, '/') + '?' + volParam().slice(1);
     }
     videoEl.play();
   }
@@ -852,11 +925,11 @@ const PAGE_HTML = `<!DOCTYPE html>
     if (isPlayerMode) {
       items = playlist;
       idx = playlistIndex;
-      icon = '&#9654;';
+      icon = ICN.play;
     } else {
       items = siblingFolders;
       idx = siblingIndex;
-      icon = '&#128193;';
+      icon = ICN.folder;
     }
     if (items.length === 0) return '<div class="popover-empty">No items</div>';
 
@@ -915,7 +988,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   addLongPress(pillNext, (el) => showPeek(el, buildPillPeekHtml()));
 
   async function showFolderPeek(el, folderPath) {
-    const url = '/api/browse?dir=' + encodeURIComponent(folderPath);
+    const url = '/api/browse?dir=' + encodeURIComponent(folderPath) + volParam();
     try {
       const res = await fetch(url);
       const data = await res.json();
@@ -927,7 +1000,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       let html = '<div class="popover-title">' + esc(folderPath.split('/').pop()) + '</div>';
       for (const item of items) {
         const isFolder = !('size' in item);
-        const icon = isFolder ? '&#128193;' : '&#9654;';
+        const icon = isFolder ? ICN.folder : ICN.play;
         const click = isFolder
           ? ' onclick="popNavFolder(\\'' + esc(item.path).replace(/'/g,"\\\\'") + '\\')"'
           : ' onclick="popPlayFromFolder(\\'' + esc(item.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(item.name).replace(/'/g,"\\\\'") + '\\')"';
@@ -994,8 +1067,9 @@ const PAGE_HTML = `<!DOCTYPE html>
     }
 
     for (const v of sorted) {
+      const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
       html += '<div class="item" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
-        + '<div class="icon icon-play"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg></div>'
+        + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg></div>'
         + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
         + '<div class="item-size">' + fmtSize(v.size) + '</div></div></div>';
     }
@@ -1013,7 +1087,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     const parts = dir.split('/');
     const current = parts.pop();
     const parentDir = parts.length ? parts.join('/') : null;
-    const parentUrl = parentDir ? '/api/browse?dir=' + encodeURIComponent(parentDir) : '/api/browse';
+    const parentUrl = (parentDir ? '/api/browse?dir=' + encodeURIComponent(parentDir) : '/api/browse?_=1') + volParam();
     try {
       const res = await fetch(parentUrl);
       const parentData = await res.json();
@@ -1027,7 +1101,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   async function navigate(dir, autoPlay) {
     currentDir = dir;
-    const url = dir ? '/api/browse?dir=' + encodeURIComponent(dir) : '/api/browse';
+    const url = (dir ? '/api/browse?dir=' + encodeURIComponent(dir) : '/api/browse?_=1') + volParam();
     const [res] = await Promise.all([fetch(url), fetchSiblings(dir)]);
     const data = await res.json();
     render(data);
@@ -1039,14 +1113,91 @@ const PAGE_HTML = `<!DOCTYPE html>
     }
   }
 
+  async function showVolumes() {
+    currentDir = null;
+    currentVol = null;
+    playlist = [];
+    playlistIndex = -1;
+    siblingFolders = [];
+    siblingIndex = -1;
+    updateNavTitle();
+    updatePill();
+    updateHash();
+
+    const res = await fetch('/api/volumes');
+    const volumes = await res.json();
+    cachedVolumes = volumes;
+
+    // Also show the default media dir content
+    const browseRes = await fetch('/api/browse?_=1');
+    const browseData = await browseRes.json();
+    const sorted = sortVideos(browseData.videos);
+    playlist = sorted;
+
+    let html = '';
+    if (volumes.length > 0) {
+      html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Volumes</div>';
+      html += '<div class="item-list" style="padding:0 16px 16px">';
+      for (const vol of volumes) {
+        html += '<div class="item" onclick="selectVolume(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\')">'
+          + '<div class="icon icon-volume"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="white" stroke-width="1.2"/><line x1="2" y1="9" x2="14" y2="9" stroke="white" stroke-width="1"/><circle cx="11.5" cy="11" r="0.9" fill="white"/></svg></div>'
+          + '<div class="item-info"><div class="item-name">' + esc(vol) + '</div></div></div>';
+      }
+      html += '</div>';
+    }
+
+    if (browseData.folders.length || sorted.length) {
+      if (volumes.length > 0) {
+        html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Local</div>';
+      }
+      html += '<div class="item-list" style="padding:0 16px 16px">';
+      for (const folder of browseData.folders) {
+        html += '<div class="item" data-folder-path="' + esc(folder.path) + '" onclick="navigate(\\'' + esc(folder.path).replace(/'/g,"\\\\'") + '\\')">'
+          + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg></div>'
+          + '<div class="item-info"><div class="item-name">' + esc(folder.name) + '</div></div></div>';
+      }
+      for (const v of sorted) {
+        const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
+        html += '<div class="item" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
+          + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg></div>'
+          + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
+          + '<div class="item-size">' + fmtSize(v.size) + '</div></div></div>';
+      }
+      html += '</div>';
+    }
+
+    if (!html) {
+      html = '<div class="empty">No videos found.<br>Pass your media directory as an argument:<br><code>node server.js /path/to/videos</code></div>';
+    }
+
+    library.innerHTML = html;
+    window.scrollTo(0, 0);
+  }
+
+  function selectVolume(vol) {
+    currentVol = vol;
+    navigate(null);
+  }
+
   // expose to inline onclick handlers
   window.navigate = navigate;
   window.playVideo = playVideo;
+  window.selectVolume = selectVolume;
   window.addEventListener('beforeunload', stopHls);
+
+  // fetch volumes eagerly so long-press menus always have them
+  fetch('/api/volumes').then(r => r.json()).then(v => { cachedVolumes = v; }).catch(() => {});
 
   // restore state from hash on load
   const initial = parseHash();
-  navigate(initial.dir || null, initial.play || null);
+  if (initial.vol) {
+    currentVol = initial.vol;
+    navigate(initial.dir || null, initial.play || null);
+  } else if (initial.dir || initial.play) {
+    navigate(initial.dir || null, initial.play || null);
+  } else {
+    showVolumes();
+  }
 </script>
 </body>
 </html>`;
