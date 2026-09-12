@@ -232,6 +232,7 @@ app.get("/api/hls/:sessionId/playlist.m3u8", (req, res) => {
 app.get("/api/hls/:sessionId/:segment", (req, res) => {
   const session = hlsSessions.get(req.params.sessionId);
   if (!session) return res.status(404).end();
+  session.lastAccess = Date.now();
 
   const segPath = join(session.tmpDir, req.params.segment);
   if (!existsSync(segPath)) return res.status(404).end();
@@ -261,6 +262,23 @@ function getLocalIPs() {
   }
   return results;
 }
+
+// Clean up all HLS sessions on server shutdown
+function cleanupAll() {
+  for (const id of hlsSessions.keys()) destroyHlsSession(id);
+}
+process.on("SIGINT", () => { cleanupAll(); process.exit(); });
+process.on("SIGTERM", () => { cleanupAll(); process.exit(); });
+
+// Reap stale sessions (ffmpeg done + no playlist request in 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of hlsSessions) {
+    if (session.done && (!session.lastAccess || now - session.lastAccess > 300000)) {
+      destroyHlsSession(id);
+    }
+  }
+}, 60000);
 
 const PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
