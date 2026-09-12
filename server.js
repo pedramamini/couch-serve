@@ -26,6 +26,10 @@ function resolveBase(req) {
   return MEDIA_DIR;
 }
 
+app.get("/api/config", (_req, res) => {
+  res.json({ mediaDir: MEDIA_DIR });
+});
+
 app.get("/api/volumes", (_req, res) => {
   try {
     const entries = readdirSync("/Volumes", { withFileTypes: true });
@@ -303,6 +307,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   .sr-info { min-width: 0; flex: 1; }
   .sr-empty { padding: 10px 14px; font-size: 0.8rem; color: var(--text-dim); font-style: italic; }
 
+  #reload-btn { background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 4px 6px; flex-shrink: 0; }
   #sort-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 0.8rem; padding: 6px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; flex-shrink: 0; margin-right: 4px; }
   #sort-btn:hover { border-color: var(--accent); }
 
@@ -318,6 +323,8 @@ const PAGE_HTML = `<!DOCTYPE html>
   .icon-transcode { background: #e05555; }
   .icon-folder { background: #e8a838; }
   .icon-volume { background: #8b5cf6; }
+  .icon { position: relative; }
+  .star-badge { position: absolute; top: -3px; right: -3px; width: 12px; height: 12px; }
 
   .item-info { flex: 1; min-width: 0; }
   .item-name { font-size: 0.95rem; word-break: break-word; }
@@ -325,6 +332,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   #player-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #000; z-index: 5; display: none; flex-direction: column; }
   #player-overlay.active { display: flex; }
+  body.player-open { overflow: hidden; }
   #video-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
   #video-wrap video { flex: 1; width: 100%; min-height: 0; background: #000; padding-bottom: env(safe-area-inset-bottom, 0px); }
 
@@ -373,6 +381,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     <button id="search-btn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6.5" cy="6.5" r="4.5"/><line x1="10" y1="10" x2="14" y2="14"/></svg></button>
     <input id="search-input" type="text" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
   </div>
+  <button id="reload-btn" style="display:none"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 8a6 6 0 0 1 10.3-4.2M14 8a6 6 0 0 1-10.3 4.2"/><polyline points="2,2 2,5 5,5"/><polyline points="14,14 14,11 11,11"/></svg></button>
   <button id="sort-btn">Sort</button>
   <div id="nav-pill">
     <button class="pill-btn pill-prev disabled" id="pill-prev"><span class="pill-arrow">&larr;</span> <span class="pill-name" id="pill-prev-name"></span></button>
@@ -420,6 +429,8 @@ const PAGE_HTML = `<!DOCTYPE html>
   const navTitle = document.getElementById('nav-title');
   const backBtn = document.getElementById('back-btn');
   const sortBtn = document.getElementById('sort-btn');
+  const reloadBtn = document.getElementById('reload-btn');
+  reloadBtn.addEventListener('click', () => { location.reload(); });
   const sortMenu = document.getElementById('sort-menu');
   const pillPrev = document.getElementById('pill-prev');
   const pillNext = document.getElementById('pill-next');
@@ -438,6 +449,42 @@ const PAGE_HTML = `<!DOCTYPE html>
   let sortMode = 'name-asc';
   let cachedVolumes = [];
 
+  const STAR_BADGE = '<svg class="star-badge" viewBox="0 0 12 12"><polygon points="6,0.5 7.5,4 11.5,4.5 8.5,7 9.5,11 6,9 2.5,11 3.5,7 0.5,4.5 4.5,4" fill="#f5c518"/></svg>';
+  const STAR_ICON = '<svg viewBox="0 0 12 12" width="14" height="14"><polygon points="6,0.5 7.5,4 11.5,4.5 8.5,7 9.5,11 6,9 2.5,11 3.5,7 0.5,4.5 4.5,4" fill="#f5c518"/></svg>';
+
+  let serverMediaDir = '';
+  function favKey() { return 'fav:' + serverMediaDir + ':' + (currentVol || 'local'); }
+  function getFavorites() {
+    try { return JSON.parse(localStorage.getItem(favKey()) || '[]'); } catch { return []; }
+  }
+  function saveFavorites(favs) { localStorage.setItem(favKey(), JSON.stringify(favs)); }
+  function isFavorite(path) { return getFavorites().some(f => f.path === path); }
+  function addFavorite(video) {
+    const favs = getFavorites();
+    if (!favs.some(f => f.path === video.path)) {
+      favs.push({ name: video.name, path: video.path, size: video.size, transcode: video.transcode });
+      saveFavorites(favs);
+    }
+  }
+  function removeFavorite(path) {
+    saveFavorites(getFavorites().filter(f => f.path !== path));
+  }
+  function getAllFavorites() {
+    const all = [];
+    const prefix = 'fav:' + serverMediaDir + ':';
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key.startsWith(prefix)) {
+        const source = key.slice(prefix.length);
+        try {
+          const items = JSON.parse(localStorage.getItem(key) || '[]');
+          for (const item of items) all.push({ ...item, _source: source });
+        } catch {}
+      }
+    }
+    return all;
+  }
+
   function volParam() { return currentVol ? '&vol=' + encodeURIComponent(currentVol) : ''; }
   let playlist = [];
   let playlistIndex = -1;
@@ -450,6 +497,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     isPlayerMode = true;
     navbar.classList.add('player-mode');
     overlay.classList.add('active');
+    document.body.classList.add('player-open');
     sortBtn.style.display = 'none';
   }
 
@@ -464,6 +512,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     isPlayerMode = false;
     navbar.classList.remove('player-mode');
     overlay.classList.remove('active');
+    document.body.classList.remove('player-open');
     sortBtn.style.display = '';
     videoEl.pause();
     videoEl.removeAttribute('src');
@@ -744,15 +793,19 @@ const PAGE_HTML = `<!DOCTYPE html>
       const v = playlist[playlistIndex];
       navTitle.textContent = prefix + (currentDir ? currentDir + '/' : '') + v.name;
       backBtn.style.display = '';
+      reloadBtn.style.display = 'none';
     } else if (currentDir) {
       navTitle.textContent = prefix + currentDir;
       backBtn.style.display = '';
+      reloadBtn.style.display = 'none';
     } else if (currentVol) {
       navTitle.textContent = currentVol;
       backBtn.style.display = '';
+      reloadBtn.style.display = 'none';
     } else {
       navTitle.textContent = 'Videos';
       backBtn.style.display = 'none';
+      reloadBtn.style.display = '';
     }
   }
 
@@ -833,6 +886,7 @@ const PAGE_HTML = `<!DOCTYPE html>
         isPlayerMode = false;
         navbar.classList.remove('player-mode');
         overlay.classList.remove('active');
+        document.body.classList.remove('player-open');
         sortBtn.style.display = '';
         videoEl.pause();
         videoEl.removeAttribute('src');
@@ -1017,19 +1071,54 @@ const PAGE_HTML = `<!DOCTYPE html>
     } catch {}
   }
 
-  // Delegated long-press for folder items
+  // Delegated long-press for folder and video items
   library.addEventListener('touchstart', (e) => {
-    const item = e.target.closest('[data-folder-path]');
-    if (!item) return;
+    const folder = e.target.closest('[data-folder-path]');
+    const video = e.target.closest('[data-video-path]');
+    if (!folder && !video) return;
     clearLongPress();
     lpTimer = setTimeout(() => {
       e.preventDefault();
-      showFolderPeek(item, item.dataset.folderPath);
+      if (folder) {
+        showFolderPeek(folder, folder.dataset.folderPath);
+      } else if (video) {
+        const path = video.dataset.videoPath;
+        const name = video.dataset.videoName;
+        const vol = video.dataset.videoVol || '';
+        const isFav = isFavorite(path);
+        const favLabel = isFav ? 'Remove from Favorites' : 'Add to Favorites';
+        const action = isFav ? 'removeFav' : 'addFav';
+        const parts = path.split('/');
+        parts.pop();
+        const parentDir = parts.length ? parts.join('/') : null;
+        let peekHtml = '<div class="popover-item" onclick="toggleFav(\\'' + action + '\\',\\'' + esc(path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(name).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + STAR_ICON + '</span><span class="popover-name">' + favLabel + '</span></div>';
+        if (parentDir && !currentDir) {
+          peekHtml += '<div class="popover-item" onclick="goToFavFolder(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\',\\'' + esc(parentDir).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + ICN.folder + '</span><span class="popover-name">Go to folder</span></div>';
+        }
+        showPeek(video, peekHtml);
+      }
     }, 500);
   }, { passive: false });
   library.addEventListener('touchend', clearLongPress);
   library.addEventListener('touchmove', clearLongPress);
   library.addEventListener('touchcancel', clearLongPress);
+
+  window.goToFavFolder = function(vol, dir) {
+    closePeek();
+    currentVol = vol || null;
+    navigate(dir);
+  };
+
+  window.toggleFav = function(action, path, name) {
+    closePeek();
+    if (action === 'addFav') {
+      const v = playlist.find(v => v.path === path);
+      if (v) addFavorite(v);
+    } else {
+      removeFavorite(path);
+      if (!currentDir && !currentVol) showVolumes();
+    }
+  };
 
   function sortItems(list) {
     const sorted = [...list];
@@ -1075,8 +1164,9 @@ const PAGE_HTML = `<!DOCTYPE html>
 
     for (const v of sorted) {
       const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
-      html += '<div class="item" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
-        + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg></div>'
+      const star = isFavorite(v.path) ? STAR_BADGE : '';
+      html += '<div class="item" data-video-path="' + esc(v.path) + '" data-video-name="' + esc(v.name) + '" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
+        + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>' + star + '</div>'
         + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
         + '<div class="item-size">' + fmtSize(v.size) + '</div></div></div>';
     }
@@ -1158,6 +1248,21 @@ const PAGE_HTML = `<!DOCTYPE html>
       html += '</div>';
     }
 
+    const allFavs = getAllFavorites();
+    if (allFavs.length > 0) {
+      html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Favorites</div>';
+      html += '<div class="item-list" style="padding:0 16px 16px">';
+      for (const v of allFavs) {
+        const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
+        const vol = v._source === 'local' ? '' : v._source;
+        html += '<div class="item" data-video-path="' + esc(v.path) + '" data-video-name="' + esc(v.name) + '" data-video-vol="' + esc(vol) + '" onclick="playFavVol(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
+          + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>' + STAR_BADGE + '</div>'
+          + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
+          + (vol ? '<div class="item-size">' + esc(vol) + '</div>' : (v.size ? '<div class="item-size">' + fmtSize(v.size) + '</div>' : '')) + '</div></div>';
+      }
+      html += '</div>';
+    }
+
     if (sortedFolders.length || sorted.length) {
       if (volumes.length > 0) {
         html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Local</div>';
@@ -1170,8 +1275,9 @@ const PAGE_HTML = `<!DOCTYPE html>
       }
       for (const v of sorted) {
         const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
-        html += '<div class="item" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
-          + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg></div>'
+        const star = isFavorite(v.path) ? STAR_BADGE : '';
+        html += '<div class="item" data-video-path="' + esc(v.path) + '" data-video-name="' + esc(v.name) + '" onclick="playVideo(\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
+          + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>' + star + '</div>'
           + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
           + '<div class="item-size">' + fmtSize(v.size) + '</div></div></div>';
       }
@@ -1186,6 +1292,21 @@ const PAGE_HTML = `<!DOCTYPE html>
     window.scrollTo(0, 0);
   }
 
+  window.playFav = function(path, name) {
+    const parts = path.split('/');
+    parts.pop();
+    const dir = parts.length ? parts.join('/') : null;
+    navigate(dir, path);
+  };
+
+  window.playFavVol = function(vol, path, name) {
+    currentVol = vol || null;
+    const parts = path.split('/');
+    parts.pop();
+    const dir = parts.length ? parts.join('/') : null;
+    navigate(dir, path);
+  };
+
   function selectVolume(vol) {
     currentVol = vol;
     navigate(null);
@@ -1197,19 +1318,23 @@ const PAGE_HTML = `<!DOCTYPE html>
   window.selectVolume = selectVolume;
   window.addEventListener('beforeunload', stopHls);
 
-  // fetch volumes eagerly so long-press menus always have them
-  fetch('/api/volumes').then(r => r.json()).then(v => { cachedVolumes = v; }).catch(() => {});
-
-  // restore state from hash on load
-  const initial = parseHash();
-  if (initial.vol) {
-    currentVol = initial.vol;
-    navigate(initial.dir || null, initial.play || null);
-  } else if (initial.dir || initial.play) {
-    navigate(initial.dir || null, initial.play || null);
-  } else {
-    showVolumes();
-  }
+  // init: fetch config + volumes, then restore state
+  Promise.all([
+    fetch('/api/config').then(r => r.json()),
+    fetch('/api/volumes').then(r => r.json()),
+  ]).then(([config, volumes]) => {
+    serverMediaDir = config.mediaDir;
+    cachedVolumes = volumes;
+    const initial = parseHash();
+    if (initial.vol) {
+      currentVol = initial.vol;
+      navigate(initial.dir || null, initial.play || null);
+    } else if (initial.dir || initial.play) {
+      navigate(initial.dir || null, initial.play || null);
+    } else {
+      showVolumes();
+    }
+  });
 </script>
 </body>
 </html>`;
