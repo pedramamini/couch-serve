@@ -63,14 +63,12 @@ app.get("/api/browse", (req, res) => {
     try { stat = statSync(full); } catch { continue; }
     const childPath = relDir ? relDir + "/" + entry.name : entry.name;
     if (stat.isDirectory()) {
-      folders.push({ name: entry.name, path: childPath });
+      folders.push({ name: entry.name, path: childPath, mtime: stat.mtimeMs });
     } else if (stat.isFile() && VIDEO_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
       const needsTranscode = !NATIVE_EXTENSIONS.has(extname(entry.name).toLowerCase());
       videos.push({ name: entry.name, path: childPath, size: stat.size, mtime: stat.mtimeMs, transcode: needsTranscode });
     }
   }
-
-  folders.sort((a, b) => a.name.localeCompare(b.name));
 
   res.json({ dir: relDir || null, folders, videos });
 });
@@ -359,7 +357,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   .popover-divider { height: 1px; background: var(--border); margin: 4px 0; }
   .popover-empty { padding: 10px 14px; font-size: 0.8rem; color: var(--text-dim); font-style: italic; }
 
-  #sort-menu { display: none; position: fixed; z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 6px 0; min-width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  #sort-menu { display: none; position: fixed; z-index: 9999; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 6px 0; min-width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
   #sort-menu.open { display: block; }
   #sort-menu button { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text); font-size: 0.9rem; padding: 10px 16px; cursor: pointer; }
   #sort-menu button:hover { background: var(--border); }
@@ -624,12 +622,18 @@ const PAGE_HTML = `<!DOCTYPE html>
   document.addEventListener('click', (e) => { sortMenu.classList.remove('open'); if (!e.target.closest('#search-wrap') && !e.target.closest('#search-results')) closeSearch(); });
 
   sortMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
     const btn = e.target.closest('button[data-sort]');
     if (!btn) return;
     sortMode = btn.dataset.sort;
     sortMenu.classList.remove('open');
-    if (currentData) render(currentData);
+    if (currentData) {
+      render(currentData);
+    } else if (!currentVol && !currentDir) {
+      showVolumes();
+    }
   });
+  sortMenu.addEventListener('touchend', (e) => { e.stopPropagation(); });
 
   // Search
   const searchBtn = document.getElementById('search-btn');
@@ -807,6 +811,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   window.addEventListener('popstate', async () => {
     restoringState = true;
     const p = parseHash();
+    currentVol = p.vol || null;
     if (p.play) {
       const dir = p.dir || null;
       if (dir !== currentDir) {
@@ -1026,31 +1031,33 @@ const PAGE_HTML = `<!DOCTYPE html>
   library.addEventListener('touchmove', clearLongPress);
   library.addEventListener('touchcancel', clearLongPress);
 
-  function sortVideos(videos) {
-    const list = [...videos];
+  function sortItems(list) {
+    const sorted = [...list];
     switch (sortMode) {
-      case 'name-asc':  return list.sort((a,b) => a.name.localeCompare(b.name));
-      case 'name-desc': return list.sort((a,b) => b.name.localeCompare(a.name));
-      case 'size-asc':  return list.sort((a,b) => a.size - b.size);
-      case 'size-desc': return list.sort((a,b) => b.size - a.size);
-      case 'date-asc':  return list.sort((a,b) => a.mtime - b.mtime);
-      case 'date-desc': return list.sort((a,b) => b.mtime - a.mtime);
+      case 'name-asc':  return sorted.sort((a,b) => a.name.localeCompare(b.name));
+      case 'name-desc': return sorted.sort((a,b) => b.name.localeCompare(a.name));
+      case 'size-asc':  return sorted.sort((a,b) => (a.size || 0) - (b.size || 0));
+      case 'size-desc': return sorted.sort((a,b) => (b.size || 0) - (a.size || 0));
+      case 'date-asc':  return sorted.sort((a,b) => (a.mtime || 0) - (b.mtime || 0));
+      case 'date-desc': return sorted.sort((a,b) => (b.mtime || 0) - (a.mtime || 0));
     }
-    return list;
+    return sorted;
   }
 
   function render(data) {
     currentData = data;
+    const dir = data.dir;
 
-    const sorted = sortVideos(data.videos);
+    const sortedFolders = sortItems(data.folders);
+    const sorted = sortItems(data.videos);
     playlist = sorted;
     playlistIndex = -1;
     updateNavTitle();
     updatePill();
-    const totalItems = data.folders.length + sorted.length;
+    const totalItems = sortedFolders.length + sorted.length;
 
     if (totalItems === 0) {
-      if (!dir) {
+      if (!dir && !currentVol) {
         library.innerHTML = '<div class="empty">No videos found.<br>Pass your media directory as an argument:<br><code>node server.js /path/to/videos</code></div>';
       } else {
         library.innerHTML = '<div class="empty">Empty folder</div>';
@@ -1060,7 +1067,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
     let html = '<div class="item-list">';
 
-    for (const folder of data.folders) {
+    for (const folder of sortedFolders) {
       html += '<div class="item" data-folder-path="' + esc(folder.path) + '" onclick="navigate(\\'' + esc(folder.path).replace(/'/g,"\\\\'") + '\\')">'
         + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg></div>'
         + '<div class="item-info"><div class="item-name">' + esc(folder.name) + '</div></div></div>';
@@ -1100,6 +1107,10 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   async function navigate(dir, autoPlay) {
+    if (!dir && !currentVol && !autoPlay) {
+      showVolumes();
+      return;
+    }
     currentDir = dir;
     const url = (dir ? '/api/browse?dir=' + encodeURIComponent(dir) : '/api/browse?_=1') + volParam();
     const [res] = await Promise.all([fetch(url), fetchSiblings(dir)]);
@@ -1131,7 +1142,8 @@ const PAGE_HTML = `<!DOCTYPE html>
     // Also show the default media dir content
     const browseRes = await fetch('/api/browse?_=1');
     const browseData = await browseRes.json();
-    const sorted = sortVideos(browseData.videos);
+    const sortedFolders = sortItems(browseData.folders);
+    const sorted = sortItems(browseData.videos);
     playlist = sorted;
 
     let html = '';
@@ -1146,12 +1158,12 @@ const PAGE_HTML = `<!DOCTYPE html>
       html += '</div>';
     }
 
-    if (browseData.folders.length || sorted.length) {
+    if (sortedFolders.length || sorted.length) {
       if (volumes.length > 0) {
         html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Local</div>';
       }
       html += '<div class="item-list" style="padding:0 16px 16px">';
-      for (const folder of browseData.folders) {
+      for (const folder of sortedFolders) {
         html += '<div class="item" data-folder-path="' + esc(folder.path) + '" onclick="navigate(\\'' + esc(folder.path).replace(/'/g,"\\\\'") + '\\')">'
           + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg></div>'
           + '<div class="item-info"><div class="item-name">' + esc(folder.name) + '</div></div></div>';
