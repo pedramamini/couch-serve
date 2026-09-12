@@ -286,7 +286,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Video Streamer</title>
+<title>couch-serve</title>
 <style>
   :root { --bg: #0a0a0a; --surface: #161616; --border: #2a2a2a; --text: #e0e0e0; --text-dim: #888; --accent: #4a9eff; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -821,7 +821,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       backBtn.style.display = '';
       reloadBtn.style.display = 'none';
     } else {
-      navTitle.textContent = 'Videos';
+      navTitle.textContent = 'couch-serve';
       backBtn.style.display = 'none';
       reloadBtn.style.display = '';
     }
