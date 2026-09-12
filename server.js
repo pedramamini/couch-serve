@@ -270,7 +270,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 
-  #navbar { position: sticky; top: 0; padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; background: var(--bg); z-index: 10; }
+  #navbar { position: sticky; top: 0; padding: 14px 16px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; background: var(--bg); z-index: 10; }
   #navbar.player-mode { background: rgba(0,0,0,0.9); border-bottom-color: #222; }
   #back-btn { background: none; border: none; color: var(--accent); font-size: 0.95rem; cursor: pointer; padding: 4px 8px 4px 0; flex-shrink: 0; white-space: nowrap; }
   #nav-title { flex: 1; min-width: 0; font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
