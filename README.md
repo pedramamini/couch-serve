@@ -39,6 +39,14 @@ node server.js [media-dir] [options]
 
 Options:
   --port <n>   Port to listen on (default: 8080, or PORT env)
+  --host <mode> Which interface(s) to bind, IPv4 only (default: auto,
+                 or HOSTS env; --hosts is an alias):
+                 auto        loopback + LAN IP + Bonjour .local name
+                             + Tailscale IP/DNS when present
+                 localhost   loopback only, not reachable from other devices
+                 <csv>       explicit IPs/hostnames,
+                             e.g. 192.168.1.10,my-mac.local
+                 0.0.0.0     all interfaces (previous behavior, least secure)
   --demo       Launch with fake data for screenshots
   --help, -h   Show this help
 ```
@@ -46,9 +54,21 @@ Options:
 ```bash
 node server.js ~/Movies
 node server.js ~/Movies --port 3000
+node server.js ~/Movies --host localhost
+node server.js ~/Movies --host 192.168.1.10,my-mac.local
 node server.js /Volumes/External
 node server.js --demo
 ```
+
+Just run it and it works on your local network (e.g. from an iPad):
+by default the server binds loopback, the primary LAN IP, the Bonjour
+`.local` name, and — when Tailscale is installed — the Tailscale IP and
+MagicDNS name, instead of `0.0.0.0`. That keeps the zero-config charm
+while no longer listening on every interface. Binding is IPv4-only.
+Pass `--host` (`--hosts` works too, or `HOSTS`
+env) to override; `auto` may also be mixed into a list
+(e.g. `--host auto,10.0.0.5`), and `--host 0.0.0.0` restores binding to
+all interfaces.
 
 The server is a single file (`server.js`). No build step, no config file, no database. HLS temp files are cleaned up automatically on stop, shutdown, or after 5 minutes of inactivity.
 

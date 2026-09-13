@@ -2,9 +2,11 @@ import express from "express";
 import { createReadStream, readFileSync, statSync, readdirSync, mkdtempSync, rmSync, existsSync } from "fs";
 import { join, extname, dirname } from "path";
 import { fileURLToPath } from "url";
-import { networkInterfaces } from "os";
-import { spawn } from "child_process";
-import { tmpdir } from "os";
+import { networkInterfaces, hostname, tmpdir } from "os";
+import { spawn, execFileSync } from "child_process";
+import { lookup as dnsLookupCallback } from "dns";
+import { promisify } from "util";
+import { isIP } from "net";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -17,22 +19,57 @@ Usage: node server.js [media-dir] [options]
 
 Options:
   --port <n>   Port to listen on (default: 8080, or PORT env)
+  --host <mode> Which interface(s) to bind, IPv4 only (default: auto,
+                 or HOSTS env; --hosts is an alias):
+                 auto        loopback + LAN IP + Bonjour .local name
+                             + Tailscale IP/DNS when present
+                 localhost   loopback only, not reachable from other devices
+                 <csv>       explicit IPs/hostnames,
+                             e.g. 192.168.1.10,my-mac.local
+                 0.0.0.0     all interfaces (previous behavior, least secure)
   --demo       Launch with fake data for screenshots
   --help, -h   Show this help
 
 Examples:
   node server.js ~/Movies
   node server.js ~/Movies --port 3000
+  node server.js ~/Movies --host localhost
+  node server.js ~/Movies --host 192.168.1.10,my-mac.local
   node server.js --demo`);
   process.exit(0);
 }
 
 const DEMO_MODE = args.includes("--demo");
-const portIdx = args.indexOf("--port");
-const portVal = portIdx !== -1 ? args[portIdx + 1] : null;
-const PORT = portVal ? parseInt(portVal, 10) : parseInt(process.env.PORT || "8080", 10);
-const skipArgs = new Set(["--demo", "--port", portVal].filter(Boolean));
-const MEDIA_DIR = DEMO_MODE ? "/demo" : (args.find(a => !skipArgs.has(a) && !a.startsWith("--")) || join(__dirname, "media"));
+
+// Take an option value by position: `--flag value` or `--flag=value`.
+// Exits(2) when the value is missing, empty, or another flag. Returns the
+// consumed indices so positional args (media dir) can skip them by position.
+function takeOptionValue(names, hint) {
+  const idx = args.findIndex(a => names.some(n => a === n || a.startsWith(n + "=")));
+  if (idx === -1) return { used: new Set(), value: null };
+  const tok = args[idx];
+  const inline = tok.includes("=");
+  const value = inline ? tok.slice(tok.indexOf("=") + 1) : args[idx + 1];
+  if (value === undefined || !value.trim() || value.startsWith("--")) {
+    console.error(`Missing value for ${names[0]} (expected ${hint})`);
+    process.exit(2);
+  }
+  return { used: new Set(inline ? [idx] : [idx, idx + 1]), value };
+}
+
+const portOpt = takeOptionValue(["--port"], "--port <n>");
+const PORT = portOpt.value !== null ? parseInt(portOpt.value, 10) : parseInt(process.env.PORT || "8080", 10);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`Invalid port: ${portOpt.value !== null ? portOpt.value : process.env.PORT} (expected 1-65535)`);
+  process.exit(2);
+}
+const hostsOpt = takeOptionValue(["--host", "--hosts"], "--host <mode>");
+const HOSTS = hostsOpt.value
+  ? hostsOpt.value.split(",").map(s => s.trim()).filter(Boolean)
+  : (process.env.HOSTS ? process.env.HOSTS.split(",").map(s => s.trim()).filter(Boolean) : null);
+const demoIdx = args.indexOf("--demo");
+const ignoredIndices = new Set([demoIdx, ...portOpt.used, ...hostsOpt.used].filter(i => i >= 0));
+const MEDIA_DIR = DEMO_MODE ? "/demo" : (args.filter((_, i) => !ignoredIndices.has(i)).find(a => !a.startsWith("--")) || join(__dirname, "media"));
 const NATIVE_EXTENSIONS = new Set([".mp4", ".m4v", ".mov"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".ogv", ".3gp"]);
 
@@ -359,15 +396,157 @@ app.get("/", (_req, res) => {
   res.send(PAGE_HTML);
 });
 
-function getLocalIPs() {
+function getAllLocalIPv4s() {
   const nets = networkInterfaces();
   const results = [];
-  for (const entries of Object.values(nets)) {
-    for (const net of entries) {
-      if (net.family === "IPv4" && !net.internal) results.push(net.address);
+  for (const [name, entries] of Object.entries(nets)) {
+    for (const net of entries || []) {
+      if (net.family === "IPv4") results.push({ address: net.address, iface: name, internal: net.internal });
     }
   }
   return results;
+}
+
+function isRfc1918(ip) {
+  if (ip.startsWith("192.168.") || ip.startsWith("10.")) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  return !!m && +m[1] >= 16 && +m[1] <= 31;
+}
+
+function isCgnat100(ip) { // 100.64.0.0/10 (Tailscale, carrier-grade NAT)
+  const m = ip.match(/^100\.(\d+)\./);
+  return !!m && +m[1] >= 64 && +m[1] <= 127;
+}
+
+// Primary LAN address: must be RFC1918 when one exists (a public address is
+// only a fallback), never Tailscale CGNAT or link-local. Within the pool,
+// prefer physical interfaces over tunnels.
+function getPrimaryLanIPv4(all) {
+  const usable = all.filter(n => !n.internal && !isCgnat100(n.address) && !n.address.startsWith("169.254."));
+  const pool = usable.some(n => isRfc1918(n.address)) ? usable.filter(n => isRfc1918(n.address)) : usable;
+  const score = ({ address, iface }) => {
+    let s = 0;
+    if (/^(en|eth|wl|wlan|net)\d*/.test(iface)) s += 3;
+    if (/^(utun|tun|tailscale|ppp|tap)\d*/.test(iface)) s -= 5;
+    if (address.startsWith("192.168.")) s += 3;
+    else if (address.startsWith("172.")) s += 2;
+    else if (address.startsWith("10.")) s += 1;
+    return s;
+  };
+  const sorted = [...pool].sort((a, b) => score(b) - score(a));
+  return sorted[0]?.address || null;
+}
+
+// Bonjour/mDNS name, e.g. "My-Mac.local" (macOS via
+// scutil, otherwise derived from the OS hostname).
+function getBonjourName() {
+  try {
+    const local = execFileSync("scutil", ["--get", "LocalHostName"], { encoding: "utf8", timeout: 2000 }).trim();
+    if (local) return local + ".local";
+  } catch {}
+  const h = hostname().split(".")[0];
+  if (h) return h + ".local";
+  return null;
+}
+
+// Tailscale IPv4 + MagicDNS (e.g. "100.101.102.103" and
+// "my-mac.tailnet.ts.net"), best-effort.
+function getTailscaleInfo(all) {
+  try {
+    const out = execFileSync("tailscale", ["status", "--json"], { encoding: "utf8", timeout: 3000 });
+    const status = JSON.parse(out);
+    const ips = (status.TailscaleIPs || []).filter(ip => isIP(ip) === 4);
+    let dns = status.Self?.DNSName || "";
+    dns = dns.replace(/\.$/, "");
+    return { ips, dns: dns || null };
+  } catch {}
+  const ips = all.filter(n => !n.internal && isCgnat100(n.address)).map(n => n.address);
+  return { ips, dns: null };
+}
+
+// One discovery pass per startup: interface list, LAN pick, Bonjour name,
+// Tailscale info. Callers that need no auto-derived names skip this.
+function discoverNetwork() {
+  const all = getAllLocalIPv4s();
+  const ts = getTailscaleInfo(all);
+  return { all, lan: getPrimaryLanIPv4(all), bonjour: getBonjourName(), tsIps: ts.ips, tsDns: ts.dns };
+}
+
+function getDefaultHosts(net) {
+  const hosts = ["127.0.0.1"];
+  if (net.lan && !hosts.includes(net.lan)) hosts.push(net.lan);
+  if (net.bonjour && !hosts.some(h => h.toLowerCase() === net.bonjour.toLowerCase())) hosts.push(net.bonjour);
+  for (const ip of net.tsIps) if (!hosts.includes(ip)) hosts.push(ip);
+  if (net.tsDns && !hosts.some(h => h.toLowerCase() === net.tsDns.toLowerCase())) hosts.push(net.tsDns);
+  return hosts;
+}
+
+const dnsLookup = promisify(dnsLookupCallback);
+
+// Map requested hosts to concrete local IPv4 bind addresses.
+// - Auto-derived names (autoLabels, built from interface/scutil/tailscale
+//   ground truth, not from the network) map straight to their known IP:
+//   no DNS/mDNS lookup, so a rogue responder can't expand the bind set.
+// - Explicit user hostnames still go through DNS, intersected with local
+//   addresses. A *.ts.net name only shortcuts to the Tailscale IP when it
+//   is this machine's own MagicDNS name; anything else resolves normally.
+async function resolveBindAddresses(hosts, ctx) {
+  const { localSet, tsIps, tsDns, autoLabels } = ctx;
+  const byIp = new Map(); // ip -> { ip, labels: [] }
+  const add = (ip, label) => {
+    if (!byIp.has(ip)) byIp.set(ip, { ip, labels: [] });
+    const entry = byIp.get(ip);
+    if (!entry.labels.some(l => l.toLowerCase() === label.toLowerCase())) entry.labels.push(label);
+  };
+
+  for (const raw of hosts) {
+    const host = raw.trim().replace(/\.$/, "");
+    if (!host) continue;
+    if (host === "0.0.0.0" || host === "::") return { wildcard: host };
+    if (isIP(host)) {
+      if (isIP(host) !== 4) {
+        console.warn(`  Warning: "${host}" skipped (only IPv4 is supported)`);
+        continue;
+      }
+      if (!localSet.has(host)) console.warn(`  Warning: "${host}" is not assigned to this machine, bind may fail`);
+      add(host, host);
+      continue;
+    }
+    const lower = host.toLowerCase();
+    if (autoLabels.has(lower)) {
+      add(autoLabels.get(lower), host);
+      continue;
+    }
+    if (lower.endsWith(".ts.net")) {
+      if (tsDns && lower === tsDns.toLowerCase() && tsIps.length) {
+        tsIps.forEach(ip => add(ip, host));
+      } else {
+        console.warn(`  Warning: "${host}" skipped (not this machine's Tailscale name${tsDns ? ": " + tsDns : " and no Tailscale address found"})`);
+      }
+      continue;
+    }
+    try {
+      const results = await dnsLookup(host, { all: true });
+      const local = results.filter(r => r.family === 4 && localSet.has(r.address)).map(r => r.address);
+      if (!local.length) {
+        const found = results.map(r => r.address).join(", ") || "nothing";
+        console.warn(`  Warning: "${host}" skipped (resolves to ${found}, not a local address)`);
+        continue;
+      }
+      local.forEach(ip => add(ip, host));
+    } catch (e) {
+      console.warn(`  Warning: "${host}" skipped (${e.message})`);
+    }
+  }
+  return { wildcard: null, bound: [...byIp.values()] };
+}
+
+function listenOn(ip) {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(PORT, ip);
+    server.once("listening", () => resolve(server));
+    server.once("error", reject);
+  });
 }
 
 // Clean up all HLS sessions on server shutdown
@@ -1464,10 +1643,87 @@ const PAGE_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-app.listen(PORT, "0.0.0.0", () => {
-  const ips = getLocalIPs();
+// Expand the --host keywords: "auto" = auto-detected hosts, "localhost" =
+// loopback only. "auto" may be mixed into a list, e.g. "auto,10.0.0.5".
+// defaults is only computed (subprocesses) when an "auto" token is present.
+function expandHostKeywords(hosts, defaults) {
+  const out = [];
+  for (const h of hosts) {
+    if (h.toLowerCase() === "auto") out.push(...defaults);
+    else if (h.toLowerCase() === "localhost") out.push("127.0.0.1");
+    else out.push(h);
+  }
+  const seen = new Set();
+  return out.filter(h => {
+    const key = h.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function hostsNeedDiscovery(hosts) {
+  return hosts.some(h => {
+    const lower = h.trim().toLowerCase().replace(/\.$/, "");
+    return lower === "auto" || lower.endsWith(".ts.net");
+  });
+}
+
+const localSet = new Set(getAllLocalIPv4s().map(n => n.address));
+const net = !HOSTS || hostsNeedDiscovery(HOSTS) ? discoverNetwork() : null;
+const BIND_HOSTS = !HOSTS
+  ? getDefaultHosts(net)
+  : expandHostKeywords(HOSTS, hostsNeedDiscovery(HOSTS) ? getDefaultHosts(net) : []);
+
+// Auto-derived Bonjour name -> known LAN IP, no DNS involved (see resolver).
+const autoLabels = new Map();
+if (net?.bonjour) autoLabels.set(net.bonjour.toLowerCase(), net.lan || "127.0.0.1");
+
+const { wildcard, bound } = await resolveBindAddresses(BIND_HOSTS, {
+  localSet,
+  tsIps: net ? net.tsIps : [],
+  tsDns: net ? net.tsDns : null,
+  autoLabels,
+});
+
+if (wildcard) {
+  try {
+    await listenOn(wildcard);
+  } catch (e) {
+    console.error(`Failed to bind ${wildcard}:${PORT} (${e.message})`);
+    process.exit(1);
+  }
   console.log("Video Streamer running on port " + PORT);
   console.log("  Media directory: " + MEDIA_DIR);
   console.log("  Local:  http://localhost:" + PORT);
-  for (const ip of ips) console.log("  Network: http://" + ip + ":" + PORT);
-});
+  for (const { address } of getAllLocalIPv4s().filter(n => !n.internal)) {
+    console.log("  Network: http://" + address + ":" + PORT);
+  }
+} else {
+  if (!bound.length) {
+    console.error("No bindable hosts found in: " + BIND_HOSTS.join(", "));
+    process.exit(1);
+  }
+  const started = [];
+  for (const entry of bound) {
+    try {
+      await listenOn(entry.ip);
+      started.push(entry);
+    } catch (e) {
+      console.warn(`  Warning: failed to bind ${entry.ip}:${PORT} (${e.message})`);
+    }
+  }
+  if (!started.length) process.exit(1);
+  console.log("Video Streamer running on port " + PORT);
+  console.log("  Media directory: " + MEDIA_DIR);
+  for (const { ip } of started) console.log("  Listen: " + ip + ":" + PORT);
+  console.log("  Open one of:");
+  const seen = new Set();
+  for (const { labels } of started) {
+    for (const label of labels) {
+      if (seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      console.log("    http://" + label + ":" + PORT);
+    }
+  }
+}
