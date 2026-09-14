@@ -763,10 +763,13 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
   function saveFavorites(favs) { localStorage.setItem(favKey(), JSON.stringify(favs)); }
   function isFavorite(path) { return getFavorites().some(f => f.path === path); }
-  function addFavorite(video) {
+  function addFavorite(item) {
     const favs = getFavorites();
-    if (!favs.some(f => f.path === video.path)) {
-      favs.push({ name: video.name, path: video.path, size: video.size, transcode: video.transcode });
+    if (!favs.some(f => f.path === item.path)) {
+      const entry = { name: item.name, path: item.path };
+      if (item.isFolder) entry.isFolder = true;
+      else { entry.size = item.size; entry.transcode = item.transcode; }
+      favs.push(entry);
       saveFavorites(favs);
     }
   }
@@ -986,7 +989,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       showVolumes();
     }
   });
-  sortMenu.addEventListener('touchend', (e) => { e.stopPropagation(); });
+  sortMenu.addEventListener('pointerup', (e) => { e.stopPropagation(); });
 
   // Search
   const searchBtn = document.getElementById('search-btn');
@@ -1254,14 +1257,23 @@ const PAGE_HTML = `<!DOCTYPE html>
   // Long-press popover
   const peekPop = document.getElementById('peek-popover');
   let lpTimer = null;
+  let lpStartX = 0, lpStartY = 0;
+  let lpFired = false;
 
   function clearLongPress() {
     clearTimeout(lpTimer);
     lpTimer = null;
   }
 
+  function lpMoveCheck(e) {
+    if (lpTimer && (Math.abs(e.clientX - lpStartX) > 10 || Math.abs(e.clientY - lpStartY) > 10)) clearLongPress();
+  }
+
   function closePeek() { peekPop.classList.remove('open'); }
-  document.addEventListener('click', closePeek);
+  document.addEventListener('click', (e) => {
+    if (lpFired) { e.stopPropagation(); e.preventDefault(); lpFired = false; return; }
+    closePeek();
+  }, true);
 
   function showPeek(anchor, html) {
     peekPop.innerHTML = html;
@@ -1335,16 +1347,15 @@ const PAGE_HTML = `<!DOCTYPE html>
   };
 
   function addLongPress(el, handler) {
-    el.addEventListener('touchstart', (e) => {
+    el.addEventListener('pointerdown', (e) => {
       clearLongPress();
-      lpTimer = setTimeout(() => {
-        e.preventDefault();
-        handler(el);
-      }, 500);
-    }, { passive: false });
-    el.addEventListener('touchend', clearLongPress);
-    el.addEventListener('touchmove', clearLongPress);
-    el.addEventListener('touchcancel', clearLongPress);
+      lpStartX = e.clientX; lpStartY = e.clientY;
+      lpTimer = setTimeout(() => { lpFired = true; handler(el); }, 500);
+    });
+    el.addEventListener('pointerup', clearLongPress);
+    el.addEventListener('pointermove', lpMoveCheck);
+    el.addEventListener('pointercancel', clearLongPress);
+    el.addEventListener('contextmenu', (e) => { if (lpTimer) e.preventDefault(); });
   }
 
   addLongPress(pillPrev, (el) => showPeek(el, buildPillPeekHtml()));
@@ -1376,15 +1387,23 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   // Delegated long-press for folder and video items
-  library.addEventListener('touchstart', (e) => {
+  library.addEventListener('pointerdown', (e) => {
     const folder = e.target.closest('[data-folder-path]');
     const video = e.target.closest('[data-video-path]');
     if (!folder && !video) return;
     clearLongPress();
+    lpStartX = e.clientX; lpStartY = e.clientY;
     lpTimer = setTimeout(() => {
-      e.preventDefault();
+      lpFired = true;
       if (folder) {
-        showFolderPeek(folder, folder.dataset.folderPath);
+        const fp = folder.dataset.folderPath;
+        const fn = fp.split('/').pop();
+        const fIsFav = isFavorite(fp);
+        const fFavLabel = fIsFav ? 'Remove from Favorites' : 'Add to Favorites';
+        const fAction = fIsFav ? 'removeFav' : 'addFav';
+        let peekHtml = '<div class="popover-item" onclick="toggleFolderFav(\\'' + fAction + '\\',\\'' + esc(fp).replace(/'/g,"\\\\'") + '\\',\\'' + esc(fn).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + STAR_ICON + '</span><span class="popover-name">' + fFavLabel + '</span></div>';
+        peekHtml += '<div class="popover-item" onclick="closePeek(); peekFolderContents(\\'' + esc(fp).replace(/'/g,"\\\\'") + '\\')"><span class="popover-icon">' + ICN.folder + '</span><span class="popover-name">Peek contents</span></div>';
+        showPeek(folder, peekHtml);
       } else if (video) {
         const path = video.dataset.videoPath;
         const name = video.dataset.videoName;
@@ -1402,10 +1421,11 @@ const PAGE_HTML = `<!DOCTYPE html>
         showPeek(video, peekHtml);
       }
     }, 500);
-  }, { passive: false });
-  library.addEventListener('touchend', clearLongPress);
-  library.addEventListener('touchmove', clearLongPress);
-  library.addEventListener('touchcancel', clearLongPress);
+  });
+  library.addEventListener('pointerup', clearLongPress);
+  library.addEventListener('pointermove', lpMoveCheck);
+  library.addEventListener('pointercancel', clearLongPress);
+  library.addEventListener('contextmenu', (e) => { if (lpTimer) e.preventDefault(); });
 
   window.goToFavFolder = function(vol, dir) {
     closePeek();
@@ -1420,8 +1440,35 @@ const PAGE_HTML = `<!DOCTYPE html>
       if (v) addFavorite(v);
     } else {
       removeFavorite(path);
-      if (!currentDir && !currentVol) showVolumes();
+      if (!currentDir && !currentVol) { showVolumes(); return; }
     }
+    const el = library.querySelector('[data-video-path="' + CSS.escape(path) + '"] .icon');
+    if (el) {
+      const existing = el.querySelector('.star-badge');
+      if (action === 'addFav' && !existing) el.insertAdjacentHTML('beforeend', STAR_BADGE);
+      else if (action !== 'addFav' && existing) existing.remove();
+    }
+  };
+
+  window.toggleFolderFav = function(action, path, name) {
+    closePeek();
+    if (action === 'addFav') {
+      addFavorite({ name: name, path: path, isFolder: true });
+    } else {
+      removeFavorite(path);
+      if (!currentDir && !currentVol) { showVolumes(); return; }
+    }
+    const el = library.querySelector('[data-folder-path="' + CSS.escape(path) + '"] .icon');
+    if (el) {
+      const existing = el.querySelector('.star-badge');
+      if (action === 'addFav' && !existing) el.insertAdjacentHTML('beforeend', STAR_BADGE);
+      else if (action !== 'addFav' && existing) existing.remove();
+    }
+  };
+
+  window.peekFolderContents = function(path) {
+    const target = library.querySelector('[data-folder-path="' + CSS.escape(path) + '"]');
+    if (target) showFolderPeek(target, path);
   };
 
   function sortItems(list) {
@@ -1461,8 +1508,9 @@ const PAGE_HTML = `<!DOCTYPE html>
     let html = '<div class="item-list">';
 
     for (const folder of sortedFolders) {
+      const fStar = isFavorite(folder.path) ? STAR_BADGE : '';
       html += '<div class="item" data-folder-path="' + esc(folder.path) + '" onclick="navigate(\\'' + esc(folder.path).replace(/'/g,"\\\\'") + '\\')">'
-        + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg></div>'
+        + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg>' + fStar + '</div>'
         + '<div class="item-info"><div class="item-name">' + esc(folder.name) + '</div></div></div>';
     }
 
@@ -1557,12 +1605,19 @@ const PAGE_HTML = `<!DOCTYPE html>
       html += '<div style="padding:8px 16px 4px;font-size:0.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em">Favorites</div>';
       html += '<div class="item-list" style="padding:0 16px 16px">';
       for (const v of allFavs) {
-        const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
         const vol = v._source === 'local' ? '' : v._source;
-        html += '<div class="item" data-video-path="' + esc(v.path) + '" data-video-name="' + esc(v.name) + '" data-video-vol="' + esc(vol) + '" onclick="playFavVol(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
-          + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>' + STAR_BADGE + '</div>'
-          + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
-          + (vol ? '<div class="item-size">' + esc(vol) + '</div>' : (v.size ? '<div class="item-size">' + fmtSize(v.size) + '</div>' : '')) + '</div></div>';
+        if (v.isFolder) {
+          html += '<div class="item" data-folder-path="' + esc(v.path) + '" onclick="goToFavFolder(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\')">'
+            + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg>' + STAR_BADGE + '</div>'
+            + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
+            + (vol ? '<div class="item-size">' + esc(vol) + '</div>' : '') + '</div></div>';
+        } else {
+          const iconClass = v.transcode ? 'icon-transcode' : 'icon-play';
+          html += '<div class="item" data-video-path="' + esc(v.path) + '" data-video-name="' + esc(v.name) + '" data-video-vol="' + esc(vol) + '" onclick="playFavVol(\\'' + esc(vol).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.path).replace(/'/g,"\\\\'") + '\\',\\'' + esc(v.name).replace(/'/g,"\\\\'") + '\\')">'
+            + '<div class="icon ' + iconClass + '"><svg viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>' + STAR_BADGE + '</div>'
+            + '<div class="item-info"><div class="item-name">' + esc(v.name) + '</div>'
+            + (vol ? '<div class="item-size">' + esc(vol) + '</div>' : (v.size ? '<div class="item-size">' + fmtSize(v.size) + '</div>' : '')) + '</div></div>';
+        }
       }
       html += '</div>';
     }
@@ -1573,8 +1628,9 @@ const PAGE_HTML = `<!DOCTYPE html>
       }
       html += '<div class="item-list" style="padding:0 16px 16px">';
       for (const folder of sortedFolders) {
+        const fStar = isFavorite(folder.path) ? STAR_BADGE : '';
         html += '<div class="item" data-folder-path="' + esc(folder.path) + '" onclick="navigate(\\'' + esc(folder.path).replace(/'/g,"\\\\'") + '\\')">'
-          + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg></div>'
+          + '<div class="icon icon-folder"><svg viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v9H1V3z"/></svg>' + fStar + '</div>'
           + '<div class="item-info"><div class="item-name">' + esc(folder.name) + '</div></div></div>';
       }
       for (const v of sorted) {
